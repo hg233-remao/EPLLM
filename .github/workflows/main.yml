@@ -27,7 +27,7 @@ jobs:
 
       - name: 用 PyInstaller 打包
         run: |
-          pyinstaller --onefile --noconsole --icon=myicon.ico EPLLMv1.py
+          pyinstaller --onefile --noconsole --icon=v1.ico EPLLMv1.py
 
       - name: 上传 exe 为构建产物
         uses: actions/upload-artifact@v4
