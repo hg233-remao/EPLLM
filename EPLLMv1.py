@@ -918,7 +918,7 @@ def replace_once(target_file):
     global client,promptstr
     a=open(target_file,mode='r',encoding='gbk')
     response = client.chat.completions.create(
-        model="deepseek-reasoner",
+        model="deepseek-v4-flash",
         messages=[
             {"role": "system", "content": promptstr},
             {"role": "user", "content": a.read()},
