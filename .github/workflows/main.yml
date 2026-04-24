@@ -1,0 +1,52 @@
+name: Build and Release EPLLMv1
+
+on:
+  push:
+    tags:
+      - 'v1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装依赖
+        run: |
+          pip install pyinstaller openai requests Pillow
+
+      - name: 用 PyInstaller 打包
+        run: |
+          pyinstaller --onefile --noconsole --icon=myicon.ico EPLLMv1.py
+
+      - name: 上传 exe 为构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: EPLLMv1-windows
+          path: dist/EPLLMv1.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: EPLLMv1-windows
+
+      - name: 创建 Release 并上传 exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EPLLMv1.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
