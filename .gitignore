@@ -154,3 +154,6 @@ cython_debug/
 
 # 移除AI生成的过程文件
 tmp/
+
+# 用户本地的 talk 目录配置
+config.json

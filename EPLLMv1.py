@@ -1,10 +1,12 @@
 # type: ignore
+import json
 import os
 import queue
 import re
+import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import providers as pv
 
 
@@ -920,6 +922,44 @@ promptstr="""
 
 events = queue.Queue() 
 
+def app_dir() -> str:
+    '''打包成 exe 后取 exe 所在目录；源码运行时取 .py 所在目录'''
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(app_dir(), 'config.json') # 配置文件路径
+
+def load_config() -> dict:
+    '''读取上次的选择'''
+    try:
+        with open(CONFIG_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {} # 如果未读取到配置，返回空字典
+    except Exception:
+        return {}
+
+def save_config() -> None:
+    '''保存配置'''
+    try:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'talk_dir': TALK_DIR, 'talk_file': TALK_FILE},
+                      f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+_config = load_config() # 读取配置文件
+TALK_DIR = _config.get('talk_dir') or os.path.join(app_dir(), 'user', 'talk') 
+'''
+从elona+的存储结构上讲，talk文件只能放在user/talk目录下
+保留这种选择的原因是方便以后做持久化
+'''
+if not os.path.isdir(TALK_DIR):
+    TALK_DIR = os.path.join(app_dir(), 'user', 'talk') # 默认为user/talk
+TALK_FILE = _config.get('talk_file') or ''
+if TALK_FILE and not os.path.isfile(TALK_FILE):
+    TALK_FILE = ''
+
 selected_vender: pv.VendorSpec = pv.VENDORS["deepseek"]
 provider: pv.ChatProvider = None
 
@@ -947,17 +987,24 @@ def replace_once(target_file):
 def before():
     global all_threading,isCreating
     isCreating=True
-    dir1 = os.listdir('user/talk')
-    for file in dir1:
-        if file.endswith('.txt') and file != 'sample.txt':
-            t = threading.Thread(target=replace_once, args=('user/talk/' + file,),name=file+'_threading')
-            all_threading.append(t)
-    for t in all_threading:
+    try:
+        if not TALK_FILE:
+            events.put(('', '未选择要生成的 talk 文件'))
+            return
+        if not os.path.isfile(TALK_FILE):
+            events.put((TALK_FILE, '选中的文件不存在了，请重新选择'))
+            return
+        t = threading.Thread(target=replace_once,
+                             args=(TALK_FILE,),
+                             name=os.path.basename(TALK_FILE)+'_threading')
+        all_threading.append(t)
         t.start()
-    for t in all_threading:
         t.join()
-    all_threading.clear()
-    isCreating=False
+    except Exception as e:
+        events.put((TALK_FILE, f'读取失败：{e}'))
+    finally:
+        all_threading.clear()
+        isCreating=False
 def count_time():
     global pause,t,t1,label21,label31, events
     if not pause and not isCreating:
@@ -1090,6 +1137,32 @@ def finish_countdown_immediately():
     global t1, label31
     t1 = 1
     label31.config(text=t1)
+
+def refresh_talk_label():
+    '''显示当前维护的talk文件'''
+    if TALK_FILE:
+        talk_dir_label.config(text=f'talk 文件：{os.path.basename(TALK_FILE)}')
+    else:
+        talk_dir_label.config(text='talk 文件：未选择（点右侧「选择文件…」）')
+
+def choose_talk_file():
+    '''选择要生成的 talk 文件并保存配置'''
+    global TALK_FILE, TALK_DIR
+    start = os.path.dirname(TALK_FILE) if TALK_FILE else (
+        TALK_DIR if os.path.isdir(TALK_DIR) else app_dir())
+
+    # 打开文件选择对话框
+    chosen = filedialog.askopenfilename(
+        title='选择要生成的 talk 文件',
+        initialdir=start,
+        filetypes=[('talk 文件', '*.txt'), ('所有文件', '*.*')])
+    
+    if not chosen:
+        return
+    TALK_FILE = os.path.normpath(chosen)
+    TALK_DIR = os.path.dirname(TALK_FILE)
+    save_config()
+    refresh_talk_label()
 if __name__ == '__main__':
     #promptfile=open('talkai终极模板.txt',mode='r',encoding='utf-8')
     #prompt=promptfile.read()
@@ -1112,6 +1185,16 @@ if __name__ == '__main__':
                                   command = on_vender_change)
     provider_menu.config(width=20)
     provider_menu.pack(pady=10)
+
+    # 当前使用的 talk 目录
+    talk_row = tk.Frame(root)
+    talk_row.pack(pady=2)
+    talk_dir_label = tk.Label(talk_row, text='', fg='#666666',
+                              wraplength=340, justify='left')
+    talk_dir_label.pack(side=tk.LEFT)
+    talk_dir_button = tk.Button(talk_row, text='选择文件…', command=choose_talk_file)
+    talk_dir_button.pack(side=tk.LEFT, padx=4)
+    refresh_talk_label()
 
     # 密钥输入框和验证按钮
     label1 = tk.Label(root,text='密钥（复制：ctrl+c；粘贴：ctrl+v）：')
