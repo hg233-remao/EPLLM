@@ -1,10 +1,11 @@
+# type: ignore
 import os
+import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox
-import requests
-from openai import OpenAI
-import re
+import providers as pv
+
 promptstr="""
 ----------------------------------------------
 你是一个负责按照下方文档规则生成talk内容的ai，请在严格遵守以下规则的情况下生成内容，防止游戏无法读取你所生成的内容，之后会有专门的脚本将你输出的内容转换。
@@ -914,24 +915,31 @@ promptstr="""
 //10.若用户方发来的文件中人物设定比较模糊，导致每次ai生成可能产生的是不同人设，那么此时需要你尽可能生成设定来完善人设，来确保下一个ai和你生成的角色几乎是同一个人，但应当避免为这个角色赋予名字（除非设定中特殊标注了，否则你没有权限在设定中为npc赋予名字），因为玩家在游戏中可以随意编辑npc的名字，为角色设定一个专有名字会误导你在npc的对话中使用这个npc的特定名而非使用替代名字的标签导致角色输出文本和玩家设定的名字不符合的情况。
 //11.感谢您的付出
 """
-def replace_once(target_file):
-    global client,promptstr
-    a=open(target_file,mode='r',encoding='gbk')
-    response = client.chat.completions.create(
-        model="deepseek-v4-flash",
-        messages=[
-            {"role": "system", "content": promptstr},
-            {"role": "user", "content": a.read()},
-        ],
-        temperature=1,
-        stream=False
-    )
-    a.close()
-    b=response.choices[0].message.content.replace('\\n','\n')
-    a=open(target_file,mode='w',encoding='gbk')
-    a.write(b)
-    a.close()
-    print(response.choices[0].message.reasoning_content+'\n----------------------------------------------')
+
+events = queue.Queue() 
+
+selected_vender: pv.VendorSpec = pv.VENDORS["deepseek"]
+provider: pv.ChatProvider = None
+
+def replace_once(target_file): 
+    '''使用当前选定的模型提供商和密钥对指定文件进行替换'''
+    global provider
+    with open(target_file, mode='r', encoding='gbk') as f:
+        content = f.read()
+
+    try:
+        r = provider.chat(promptstr, content)
+    except pv.ProviderError as e:      # 网络/密钥/限流等，别让线程默默死掉
+        events.put((target_file, e.user_message()))
+        return
+
+    if r.truncated:
+        events.put((target_file, '输出被截断')) # 将事件放入队列中，供主线程处理
+        return
+
+    with open(target_file, mode='w', encoding='gbk') as f:
+        f.write(r.text.replace('\\n', '\n'))
+    
 def before():
     global all_threading,isCreating
     isCreating=True
@@ -947,7 +955,7 @@ def before():
     all_threading.clear()
     isCreating=False
 def count_time():
-    global pause,t,t1,label21,label31
+    global pause,t,t1,label21,label31, events
     if not pause and not isCreating:
         t1 -= 1
         label31.config(text=t1)
@@ -960,6 +968,11 @@ def count_time():
         t1 = t
     if not isCreating:
         label31.config(text=t1)
+
+    while not events.empty():
+        path, msg = events.get()
+        messagebox.showwarning('提示', f'{path}\n{msg}')
+    
     root.after(1000, count_time)
 def topause():
     global pause,button1,avaliable
@@ -993,29 +1006,62 @@ def reset():
     global t1,label31
     t1 = t
     label31.config(text=t1)
-def yanzheng():
-    global entry,client,avaliable
-    if avaliable:
+
+def verify_apikey():
+    '''验证密钥是否可用'''
+
+    global entry, provider, avaliable
+    if avaliable: # 如果已经验证过密钥并且可用，则不再重复验证
         return
-    url = "https://api.deepseek.com/user/balance"
-    if not bool(re.fullmatch(r'[A-Za-z0-9\-]+', entry.get())):
-        messagebox.showerror('错误', '讨厌啦！人家要的是密钥！密钥！')
+
+    key = entry.get().strip()
+    if not key:
+        messagebox.showerror('错误', '还没填密钥呢TAT')
+        avaliable = False
+        provider = None
+        return
+
+    # 验证密钥是否可用
+    try:
+        provider = pv.make_provider(provider_var.get(), api_key = key, max_tokens = 32768)
+    except pv.ProviderError as e:
+        messagebox.showerror('错误', f'密钥验证失败：{str(e)}')
+        provider = None
         avaliable = False
         return
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {entry.get()}"
-    }
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        client = OpenAI(
-            api_key=entry.get(),
-            base_url="https://api.deepseek.com")
-        messagebox.showinfo('成功','抱歉让大人破费了，请尽情享受吧。')
-        avaliable = True
-    else:
-        messagebox.showerror('错误','唔，看起来这密钥好像没有余额了···或者根本不是个密钥？')
+
+    # 探查模型提供商
+    pr = provider.probe()
+    if not pr:
+        messagebox.showerror('错误', f'密钥验证失败：{pr.message}')
         avaliable = False
+        provider = None
+        return
+    if not pr.has_model(selected_vender.default_model):
+        messagebox.showerror('错误', f'密钥验证失败：提供商不支持模型 {selected_vender.default_model}')
+        avaliable = False
+        provider = None
+        return
+
+    # 验证成功，provider已在前面被赋值
+    avaliable = True
+    tip = pr.message + (f'\n余额：{pr.balance}' if pr.balance else '')
+    messagebox.showinfo('成功', f'密钥验证成功！\n{tip}')
+
+def on_vender_change(vendor_id):
+    '''在下拉菜单中选择不同的模型提供商时触发，直接更换selected_vender'''
+    global selected_vender, provider, avaliable
+    selected_vender = pv.VENDORS[vendor_id]
+    provider = None
+    avaliable = False
+    provider_menu.config(text=selected_vender.name)
+    print(f"Selected vendor changed to: {selected_vender.name}")
+
+def finish_countdown_immediately():
+    '''立即完成当前倒计时'''
+    global t1, label31
+    t1 = 1
+    label31.config(text=t1)
 if __name__ == '__main__':
     #promptfile=open('talkai终极模板.txt',mode='r',encoding='utf-8')
     #prompt=promptfile.read()
@@ -1027,13 +1073,24 @@ if __name__ == '__main__':
     avaliable=False
     root = tk.Tk()
     root.title("EPLLMv1")
-    root.geometry("600x600")
+    root.geometry("600x720")
+    selected_vender: pv.VendorSpec = pv.VENDORS["deepseek"]
+
+    # 下拉菜单
+    provider_label = tk.Label(root, text="选择模型提供商：")
+    provider_label.pack(pady=10)
+    provider_var = tk.StringVar(value="deepseek")
+    provider_menu = tk.OptionMenu(root, provider_var, *pv.VENDORS.keys(),
+                                  command = on_vender_change)
+    provider_menu.config(width=20)
+    provider_menu.pack(pady=10)
+
     label1 = tk.Label(root,text='密钥（复制：ctrl+c；粘贴：ctrl+v）：')
     label1.pack(pady=10)
     entry = tk.Entry(root,width=40)
     entry.pack(pady=10)
-    yanzhengbut = tk.Button(root,text='验证密钥',command=yanzheng)
-    yanzhengbut.pack(pady=10)
+    verify_apikeybut = tk.Button(root,text='验证密钥',command=verify_apikey)
+    verify_apikeybut.pack(pady=10)
     label2 = tk.Label(root,text=f'产生对话后倒计时重置为：（单位：秒）（下限100秒）')
     label2.pack(pady=10)
     label21 = tk.Label(root,text=t)
@@ -1044,6 +1101,8 @@ if __name__ == '__main__':
     label31.pack(pady=10)
     button1 = tk.Button(root, text="开始倒计时", command=topause)
     button1.pack(pady=10)
+    button_hasten = tk.Button(root, text="立即完成当前倒计时", command=finish_countdown_immediately)
+    button_hasten.pack(pady=10)
     button21 = tk.Button(root, text="增加产生对话后倒计时100秒", command=tplus)
     button21.pack(pady=10)
     button21p = tk.Button(root, text="增加产生对话后倒计时1000秒", command=tplusp)
