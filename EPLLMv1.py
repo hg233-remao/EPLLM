@@ -1,10 +1,12 @@
 # type: ignore
 import os
 import queue
+import re
 import threading
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import providers as pv
+
 
 promptstr="""
 ----------------------------------------------
@@ -907,7 +909,7 @@ promptstr="""
 //1.请再次检查自己所写语句的格式是否与对应输出时机的框体类型所要求的格式相符
 //2.旁白中对玩家的描述文本是不是都是用“你”来称呼
 //3.每个输出时机中的空行是不是都是以限制这个输出时机中其他语句的出现频率而非分隔两个输出时机或美观为目的而打出，在上面的输出时机介绍之间有空行仅仅是为了便于编者编辑，ai请勿模仿。
-//4.**在最终生成时，请使用\n代替换行符，目的是为了规避ai总是不自觉生成多余换行符的问题。**
+//4.**在最终生成时，请使用\n代替换行符，目的是为了规避ai总是不自觉生成多余换行符的问题，特别不要使用HTML标签<br>作为换行符**
 //5.**如果你严格遵守了换行符替换规则，那么你最后的输出结果应当是一个**单行**长文本，若不是，请修正。
 //6.不要只修正格式而不添加或者更换新内容。
 //7.北提里斯的酒吧女招待席娜不是这个你要设定的npc本身！请注意不要误以为这个npc是席娜。
@@ -937,8 +939,10 @@ def replace_once(target_file):
         events.put((target_file, '输出被截断')) # 将事件放入队列中，供主线程处理
         return
 
+    text = r.text.replace('\\n', '\n')
+    text = re.sub(r'(?i)<\s*br\s*/?\s*>', '\n', text)   # 有些模型会用 <BR> 代替换行
     with open(target_file, mode='w', encoding='gbk') as f:
-        f.write(r.text.replace('\\n', '\n'))
+        f.write(text)
     
 def before():
     global all_threading,isCreating
@@ -1037,25 +1041,49 @@ def verify_apikey():
         avaliable = False
         provider = None
         return
-    if not pr.has_model(selected_vender.default_model):
-        messagebox.showerror('错误', f'密钥验证失败：提供商不支持模型 {selected_vender.default_model}')
+    if not pr.has_model(provider.model):
+        messagebox.showerror('错误', f'密钥验证失败：提供商不支持模型 {provider.model}')
         avaliable = False
         provider = None
         return
 
+    # 模型候选：接口返回的 > 目录里预设的 > 当前模型（去重且保持顺序）
+    spec = pv.VENDORS[provider_var.get()]
+    choices = list(dict.fromkeys(list(pr.models) or list(spec.models) or [provider.model]))
+    provider_model_menu["values"] = choices
+    provider_model_var.set(provider.model if provider.model in choices else choices[0])
+    provider.model = provider_model_var.get()
+
     # 验证成功，provider已在前面被赋值
     avaliable = True
+
+    # 验证通过后才把模型下拉菜单显示出来
+    model_row.pack_forget()
+    if len(choices) > 1:
+        model_row.pack(pady=6, before=label2)
+
     tip = pr.message + (f'\n余额：{pr.balance}' if pr.balance else '')
     messagebox.showinfo('成功', f'密钥验证成功！\n{tip}')
 
+def on_provider_model_change(_event=None):
+    '''设置provider的模型为下拉菜单中选定的模型'''
+    global provider
+    if provider is not None:
+        provider.model = provider_model_var.get()
+
 def on_vender_change(vendor_id):
-    '''在下拉菜单中选择不同的模型提供商时触发，直接更换selected_vender'''
+    '''切换provider的供应商'''
     global selected_vender, provider, avaliable
     selected_vender = pv.VENDORS[vendor_id]
     provider = None
     avaliable = False
     provider_menu.config(text=selected_vender.name)
     print(f"Selected vendor changed to: {selected_vender.name}")
+
+    # 换了供应商，旧密钥和旧模型列表都作废，模型下拉菜单先藏起来
+    provider_model_var.set("")
+    provider_model_menu["values"] = ()
+    model_row.pack_forget()
 
 def finish_countdown_immediately():
     '''立即完成当前倒计时'''
@@ -1076,7 +1104,7 @@ if __name__ == '__main__':
     root.geometry("600x720")
     selected_vender: pv.VendorSpec = pv.VENDORS["deepseek"]
 
-    # 下拉菜单
+    # 提供商下拉菜单
     provider_label = tk.Label(root, text="选择模型提供商：")
     provider_label.pack(pady=10)
     provider_var = tk.StringVar(value="deepseek")
@@ -1085,12 +1113,25 @@ if __name__ == '__main__':
     provider_menu.config(width=20)
     provider_menu.pack(pady=10)
 
+    # 密钥输入框和验证按钮
     label1 = tk.Label(root,text='密钥（复制：ctrl+c；粘贴：ctrl+v）：')
     label1.pack(pady=10)
     entry = tk.Entry(root,width=40)
     entry.pack(pady=10)
     verify_apikeybut = tk.Button(root,text='验证密钥',command=verify_apikey)
     verify_apikeybut.pack(pady=10)
+
+    # 提供商模型下拉菜单
+    # 这一菜单在选择并验证密钥后才会显示
+    model_row = tk.Frame(root)
+    provider_model_label = tk.Label(model_row, text="选择模型：")
+    provider_model_label.pack(side=tk.LEFT)
+    provider_model_var = tk.StringVar()
+    provider_model_menu = ttk.Combobox(model_row, textvariable=provider_model_var,
+                                       state="readonly", width=30)
+    provider_model_menu.pack(side=tk.LEFT)
+    provider_model_menu.bind("<<ComboboxSelected>>", on_provider_model_change)
+
     label2 = tk.Label(root,text=f'产生对话后倒计时重置为：（单位：秒）（下限100秒）')
     label2.pack(pady=10)
     label21 = tk.Label(root,text=t)
