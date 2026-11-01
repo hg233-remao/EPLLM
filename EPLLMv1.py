@@ -27,12 +27,16 @@ def load_config() -> dict:
     except Exception:
         return {}
 
-def save_config(talk_dir: str, talk_file: str) -> None:
-    '''保存配置'''
+def save_config(vendor: str, model: str, api_key: str,
+                talk_dir: str, talk_file: str) -> None:
+    '''保存配置。注意：密钥是明文存放在 config.json 里的'''
     try:
         with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
             json.dump(
                 {
+                    'vendor': vendor, # 供应商
+                    'model': model, # 模型
+                    'api_key': api_key, # 密钥
                     'talk_dir': talk_dir, # talk 文件所在目录
                     'talk_file': talk_file # 当前选中的 talk 文件
                 },
@@ -61,10 +65,8 @@ def replace_once(provider, target_file, events):
         f.write(text)
 
 
-# ==================================================================
-# 界面与调度：控件和状态全部挂在实例上，不再使用模块级全局变量
-# ==================================================================
 
+# 界面与调度
 class App:
     '''主窗口。所有界面元素、运行时状态和回调都在这个类里'''
 
@@ -81,8 +83,8 @@ class App:
         self.is_creating = False                  # 是否正在生成
         self.all_threading = []                   # 本轮生成用到的线程
 
-        # ---- 上次的选择 ----
         config = load_config() # 读取配置文件
+
         # 从elona+的存储结构上讲，talk文件只能放在user/talk目录下
         # 保留这种选择的原因是方便以后做持久化
         self.talk_dir = config.get('talk_dir') or os.path.join(app_dir(), 'user', 'talk')
@@ -92,9 +94,21 @@ class App:
         if self.talk_file and not os.path.isfile(self.talk_file):
             self.talk_file = ''
 
-        self.selected_vender: pv.VendorSpec = pv.VENDORS["deepseek"]
+        # 模型相关
+        self.vendor = config.get('vendor') or 'deepseek'
+        if self.vendor not in pv.VENDORS:
+            self.vendor = 'deepseek'
+        self.model = config.get('model') or ''
+        self.api_key = config.get('api_key') or ''
+
+        self.selected_vender: pv.VendorSpec = pv.VENDORS.get(
+            self.vendor, pv.VENDORS["deepseek"])
 
         self._build_ui()
+
+        # 启动后自动验证上次保存的密钥；失败静默，不弹窗打扰
+        if self.entry.get().strip():
+            self.root.after(200, lambda: self.verify_apikey(silent=True))
 
     # 界面
     def _build_ui(self):
@@ -105,7 +119,7 @@ class App:
         # 提供商下拉菜单
         provider_label = tk.Label(self.root, text="选择模型提供商：")
         provider_label.pack(pady=10)
-        self.provider_var = tk.StringVar(value="deepseek")
+        self.provider_var = tk.StringVar(value=self.vendor)
         self.provider_menu = tk.OptionMenu(self.root, self.provider_var,
                                            *pv.VENDORS.keys(),
                                            command=self.on_vender_change)
@@ -128,6 +142,8 @@ class App:
         label1.pack(pady=10)
         self.entry = tk.Entry(self.root, width=40)
         self.entry.pack(pady=10)
+        # 自动填入上次保存的密钥
+        self.entry.insert(0, self.api_key)
         verify_apikeybut = tk.Button(self.root, text='验证密钥',
                                      command=self.verify_apikey)
         verify_apikeybut.pack(pady=10)
@@ -253,14 +269,22 @@ class App:
         self.label31.config(text=self.t1)
 
     # 密钥与供应商
-    def verify_apikey(self):
-        '''验证密钥是否可用'''
+    def verify_apikey(self, silent=False):
+        '''验证密钥（启动时自动验证用）'''
+        def tip(kind, text):
+            if silent:
+                return
+            if kind == 'error':
+                messagebox.showerror('错误', text)
+            else:
+                messagebox.showinfo('成功', text)
+
         if self.avaliable: # 如果已经验证过密钥并且可用，则不再重复验证
             return
 
         key = self.entry.get().strip()
         if not key:
-            messagebox.showerror('错误', '还没填密钥呢TAT')
+            tip('error', '还没填密钥呢TAT')
             self.avaliable = False
             self.provider = None
             return
@@ -270,7 +294,7 @@ class App:
             self.provider = pv.make_provider(self.provider_var.get(),
                                              api_key=key, max_tokens=32768)
         except pv.ProviderError as e:
-            messagebox.showerror('错误', f'密钥验证失败：{str(e)}')
+            tip('error', f'密钥验证失败：{str(e)}')
             self.provider = None
             self.avaliable = False
             return
@@ -278,13 +302,12 @@ class App:
         # 探查模型提供商
         pr = self.provider.probe()
         if not pr:
-            messagebox.showerror('错误', f'密钥验证失败：{pr.message}')
+            tip('error', f'密钥验证失败：{pr.message}')
             self.avaliable = False
             self.provider = None
             return
         if not pr.has_model(self.provider.model):
-            messagebox.showerror('错误',
-                                 f'密钥验证失败：提供商不支持模型 {self.provider.model}')
+            tip('error', f'密钥验证失败：提供商不支持模型 {self.provider.model}')
             self.avaliable = False
             self.provider = None
             return
@@ -294,40 +317,58 @@ class App:
         choices = list(dict.fromkeys(list(pr.models) or list(spec.models)
                                      or [self.provider.model]))
         self.provider_model_menu["values"] = choices
-        self.provider_model_var.set(
-            self.provider.model if self.provider.model in choices else choices[0])
+        # 优先沿用上次保存的模型，其次用供应商默认模型
+        wanted = self.model if self.model in choices else self.provider.model
+        self.provider_model_var.set(wanted if wanted in choices else choices[0])
         self.provider.model = self.provider_model_var.get()
 
         # 验证成功，provider已在前面被赋值
         self.avaliable = True
+
+        # 记住这个供应商的密钥和模型，下次自动填
+        self.api_key = key
+        self.model = self.provider.model
+        self.save_state()
 
         # 验证通过后才把模型下拉菜单显示出来
         self.model_row.pack_forget()
         if len(choices) > 1:
             self.model_row.pack(pady=6, before=self.label2)
 
-        tip = pr.message + (f'\n余额：{pr.balance}' if pr.balance else '')
-        messagebox.showinfo('成功', f'密钥验证成功！\n{tip}')
+        tip_info = pr.message + (f'\n余额：{pr.balance}' if pr.balance else '')
+        tip('ok', f'密钥验证成功！\n{tip_info}')
 
     def on_provider_model_change(self, _event=None):
         '''设置provider的模型为下拉菜单中选定的模型'''
         if self.provider is not None:
             self.provider.model = self.provider_model_var.get()
+            self.model = self.provider.model
+            self.save_state()
 
     def on_vender_change(self, vendor_id):
         '''切换provider的供应商'''
+        self.vendor = vendor_id
         self.selected_vender = pv.VENDORS[vendor_id]
         self.provider = None
         self.avaliable = False
         self.provider_menu.config(text=self.selected_vender.name)
         print(f"Selected vendor changed to: {self.selected_vender.name}")
 
-        # 换了供应商，旧密钥和旧模型列表都作废，模型下拉菜单先藏起来
+        # 换了供应商，旧密钥和旧模型列表都作废，需要重新填写密钥
+        self.api_key = ''
+        self.model = ''
+        self.entry.delete(0, tk.END)
         self.provider_model_var.set("")
         self.provider_model_menu["values"] = ()
         self.model_row.pack_forget()
+        self.save_state()
 
     # talk 文件
+    def save_state(self):
+        '''把当前选择写回 config.json'''
+        save_config(self.vendor, self.model, self.api_key,
+                    self.talk_dir, self.talk_file)
+
     def refresh_talk_label(self):
         '''显示当前维护的talk文件'''
         if self.talk_file:
@@ -352,7 +393,7 @@ class App:
             return
         self.talk_file = os.path.normpath(chosen)
         self.talk_dir = os.path.dirname(self.talk_file)
-        save_config(self.talk_dir, self.talk_file)
+        self.save_state()
         self.refresh_talk_label()
 
 
